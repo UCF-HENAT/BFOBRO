@@ -5,6 +5,8 @@ eval_classes, when provided, limits which classes are checked to those declared
 in the evaluation ontology (excluding any reference/background ontologies).
 """
 
+from collections import deque
+
 from rdflib import Graph, OWL, RDF, RDFS, URIRef
 from rdflib.term import Node
 
@@ -87,6 +89,32 @@ def _superclasses(graph: Graph, cls: URIRef) -> set[URIRef]:
     return visited
 
 
+def _find_path(graph: Graph, cls: URIRef, target: URIRef) -> list[URIRef] | None:
+    """BFS shortest rdfs:subClassOf path from *cls* to *target*. Returns the full
+    node list including both endpoints, or None if no path exists."""
+    queue: deque[tuple[URIRef, list[URIRef]]] = deque([(cls, [cls])])
+    visited: set[URIRef] = {cls}
+    while queue:
+        current, path = queue.popleft()
+        sources = list(graph.triples((current, RDFS.subClassOf, None)))
+        if _is_bfo_iri(str(current)):
+            sources += list(BFO_GRAPH.triples((current, RDFS.subClassOf, None)))
+        for _, _, parent in sources:
+            if not isinstance(parent, URIRef):
+                continue
+            new_path = path + [parent]
+            if parent == target:
+                return new_path
+            if parent not in visited:
+                visited.add(parent)
+                queue.append((parent, new_path))
+    return None
+
+
+def _format_path(graph: Graph, path: list[URIRef]) -> str:
+    return " → ".join(_label(graph, node) for node in path)
+
+
 # ── rule 1 : disjointness violations ─────────────────────────────────────────
 
 def check_disjointness_violations(
@@ -101,13 +129,20 @@ def check_disjointness_violations(
         ancestors = _superclasses(graph, cls)
         for a, b in DISJOINT_PAIRS:
             if a in ancestors and b in ancestors:
+                path_a = _find_path(graph, cls, a)
+                path_b = _find_path(graph, cls, b)
+                detail_lines = [f"Class IRI: {cls}"]
+                if path_a:
+                    detail_lines.append(f"Path to {_label(graph, a)}: {_format_path(graph, path_a)}")
+                if path_b:
+                    detail_lines.append(f"Path to {_label(graph, b)}: {_format_path(graph, path_b)}")
                 report.add(
                     Severity.ERROR,
                     "disjointness-violation",
                     _label(graph, cls),
                     f"Subclass of both {_label(graph, a)} and {_label(graph, b)}, "
                     "which BFO declares disjoint.",
-                    f"Class IRI: {cls}",
+                    "\n".join(detail_lines),
                 )
 
 
