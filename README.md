@@ -77,7 +77,7 @@ With your environment active, install BFOBRO using one of the methods below.
 ### From source (development)
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/UCF-HENAT/BFOBRO.git
 cd BFOBRO
 pip install -e ".[dev]"
 ```
