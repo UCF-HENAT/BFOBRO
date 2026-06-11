@@ -27,6 +27,7 @@ from .bfo_terms import (
 from .findings import ComplianceReport, Severity
 
 _EvalClasses = set[URIRef] | None
+_EvalProps   = set[URIRef] | None
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -117,10 +118,26 @@ def _format_path(graph: Graph, path: list[URIRef]) -> str:
 
 # ── rule 1 : disjointness violations ─────────────────────────────────────────
 
+def _superproperties(graph: Graph, prop: URIRef) -> set[URIRef]:
+    """All (direct + transitive) superproperties via rdfs:subPropertyOf."""
+    visited: set[URIRef] = set()
+    queue = [prop]
+    while queue:
+        current = queue.pop()
+        for _, _, parent in graph.triples((current, RDFS.subPropertyOf, None)):
+            if isinstance(parent, URIRef) and parent not in visited:
+                visited.add(parent)
+                queue.append(parent)
+    return visited
+
+
+# ── rule 1 : disjointness violations ─────────────────────────────────────────
+
 def check_disjointness_violations(
     graph: Graph,
     report: ComplianceReport,
     eval_classes: _EvalClasses = None,
+    eval_properties: _EvalProps = None,
 ) -> None:
     """Flag classes that are subclasses of two BFO-disjoint categories."""
     for cls in _classes(graph, eval_classes):
@@ -152,6 +169,7 @@ def check_unknown_bfo_iris(
     graph: Graph,
     report: ComplianceReport,
     eval_classes: _EvalClasses = None,
+    eval_properties: _EvalProps = None,
 ) -> None:
     """Flag references to BFO IRIs that do not exist in BFO 2020.
 
@@ -181,6 +199,7 @@ def check_property_constraints(
     graph: Graph,
     report: ComplianceReport,
     eval_classes: _EvalClasses = None,
+    eval_properties: _EvalProps = None,
 ) -> None:
     """Flag properties whose declared domain/range conflicts with BFO constraints."""
     for prop, (expected_domain, expected_range) in PROPERTY_CONSTRAINTS.items():
@@ -223,6 +242,7 @@ def check_orphaned_classes(
     graph: Graph,
     report: ComplianceReport,
     eval_classes: _EvalClasses = None,
+    eval_properties: _EvalProps = None,
 ) -> None:
     """Warn about evaluation classes that have no ancestry path to any BFO term."""
     uses_bfo = any(_is_bfo_iri(str(n)) for n in graph.all_nodes() if isinstance(n, URIRef))
@@ -255,6 +275,7 @@ def check_continuant_occurrent_polysemy(
     graph: Graph,
     report: ComplianceReport,
     eval_classes: _EvalClasses = None,
+    eval_properties: _EvalProps = None,
 ) -> None:
     """Detect properties used with both Continuant and Occurrent in domain/range."""
     for prop in _properties(graph, eval_classes):
@@ -283,6 +304,7 @@ def check_inverse_property_consistency(
     graph: Graph,
     report: ComplianceReport,
     eval_classes: _EvalClasses = None,
+    eval_properties: _EvalProps = None,
 ) -> None:
     """Flag BFO inverse pairs where only one direction is declared.
 
@@ -315,6 +337,7 @@ def check_declared_disjoint_with(
     graph: Graph,
     report: ComplianceReport,
     eval_classes: _EvalClasses = None,
+    eval_properties: _EvalProps = None,
 ) -> None:
     """Check owl:disjointWith declarations for conflicts with BFO hierarchy."""
     for a, _, b in graph.triples((None, OWL.disjointWith, None)):
@@ -343,6 +366,82 @@ def check_declared_disjoint_with(
             )
 
 
+# ── rule 8 : non-BFO-compliant external references ───────────────────────────
+
+def check_non_bfo_compliant_references(
+    graph: Graph,
+    report: ComplianceReport,
+    eval_classes: _EvalClasses = None,
+    eval_properties: _EvalProps = None,
+) -> None:
+    """Warn when an eval class or property references an external term with no BFO ancestry.
+
+    Checks rdfs:subClassOf / owl:equivalentClass for classes, and
+    rdfs:subPropertyOf / owl:equivalentProperty for object/datatype properties.
+    Annotation properties are skipped — they are not expected to root in BFO.
+    """
+    eval_cls_set: set[URIRef] = eval_classes or set()
+    eval_prop_set: set[URIRef] = eval_properties or set()
+
+    # Classes
+    for cls in _classes(graph, eval_classes):
+        if _is_bfo_iri(str(cls)):
+            continue
+        for predicate, rule_id, pred_label in (
+            (RDFS.subClassOf,     "non-bfo-compliant-superclass",        "superclass"),
+            (OWL.equivalentClass, "non-bfo-compliant-equivalent-class",  "equivalent class"),
+        ):
+            for _, _, ref in graph.triples((cls, predicate, None)):
+                if not isinstance(ref, URIRef):
+                    continue
+                if _is_bfo_iri(str(ref)):
+                    continue
+                if ref in eval_cls_set:
+                    continue
+                if any(_is_bfo_iri(str(a)) for a in _superclasses(graph, ref)):
+                    continue
+                report.add(
+                    Severity.WARNING,
+                    rule_id,
+                    _label(graph, cls),
+                    f"References external {pred_label} {_label(graph, ref)}, "
+                    "which has no superclass path to any BFO term.",
+                    f"Class IRI: {cls}\nReferenced IRI: {ref}",
+                )
+
+    # Object and datatype properties only (annotation properties are not BFO-rooted)
+    obj_data_props: set[URIRef] = set()
+    for ptype in (OWL.ObjectProperty, OWL.DatatypeProperty):
+        for s in graph.subjects(RDF.type, ptype):
+            if isinstance(s, URIRef) and s in eval_prop_set:
+                obj_data_props.add(s)
+
+    for prop in obj_data_props:
+        if _is_bfo_iri(str(prop)):
+            continue
+        for predicate, rule_id, pred_label in (
+            (RDFS.subPropertyOf,     "non-bfo-compliant-super-property",       "super-property"),
+            (OWL.equivalentProperty, "non-bfo-compliant-equivalent-property",  "equivalent property"),
+        ):
+            for _, _, ref in graph.triples((prop, predicate, None)):
+                if not isinstance(ref, URIRef):
+                    continue
+                if _is_bfo_iri(str(ref)):
+                    continue
+                if ref in eval_prop_set:
+                    continue
+                if any(_is_bfo_iri(str(p)) for p in _superproperties(graph, ref) | {ref}):
+                    continue
+                report.add(
+                    Severity.INFO,
+                    rule_id,
+                    _label(graph, prop),
+                    f"References external {pred_label} {_label(graph, ref)}, "
+                    "which has no super-property path to any BFO property.",
+                    f"Property IRI: {prop}\nReferenced IRI: {ref}",
+                )
+
+
 ALL_RULES = [
     check_disjointness_violations,
     check_unknown_bfo_iris,
@@ -351,4 +450,5 @@ ALL_RULES = [
     check_continuant_occurrent_polysemy,
     check_inverse_property_consistency,
     check_declared_disjoint_with,
+    check_non_bfo_compliant_references,
 ]

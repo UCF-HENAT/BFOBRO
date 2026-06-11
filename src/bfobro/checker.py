@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from rdflib import Graph, OWL, RDF
+from rdflib import Graph, OWL, RDF, RDFS
 from rdflib.term import URIRef
 
 from .findings import ComplianceReport
@@ -21,19 +21,23 @@ def _declared_classes(graph: Graph) -> set[URIRef]:
     for s in graph.subjects(RDF.type, OWL.Class):
         if isinstance(s, URIRef):
             classes.add(s)
-    for s, _, _ in graph.triples((None, RDF.type, OWL.Class)):
-        if isinstance(s, URIRef):
-            classes.add(s)
-    for s, _, _ in graph.triples((None, None, None)):
-        if isinstance(s, URIRef):
-            # Include any subject that appears as a subClassOf source
-            pass
-    # also pick up anonymous subClassOf subjects that are named
-    from rdflib import RDFS
     for s, _, _ in graph.triples((None, RDFS.subClassOf, None)):
         if isinstance(s, URIRef):
             classes.add(s)
     return classes
+
+
+def _declared_properties(graph: Graph) -> set[URIRef]:
+    """Properties explicitly declared or used as subproperty subjects in *graph*."""
+    props: set[URIRef] = set()
+    for ptype in (OWL.ObjectProperty, OWL.DatatypeProperty, OWL.AnnotationProperty):
+        for s in graph.subjects(RDF.type, ptype):
+            if isinstance(s, URIRef):
+                props.add(s)
+    for s, _, _ in graph.triples((None, RDFS.subPropertyOf, None)):
+        if isinstance(s, URIRef):
+            props.add(s)
+    return props
 
 
 def check_ontology(
@@ -74,8 +78,9 @@ def check_ontology(
 
     ontology_iri = _ontology_iri(eval_graph)
 
-    # Classes declared in the evaluation ontology — rules are scoped to these.
+    # Classes and properties declared in the evaluation ontology — rules are scoped to these.
     eval_classes = _declared_classes(eval_graph)
+    eval_properties = _declared_properties(eval_graph)
 
     # --- merge into one graph for ancestry lookups ---
     merged = Graph()
@@ -90,6 +95,6 @@ def check_ontology(
     )
 
     for rule in ALL_RULES:
-        rule(merged, report, eval_classes=eval_classes)
+        rule(merged, report, eval_classes=eval_classes, eval_properties=eval_properties)
 
     return report
